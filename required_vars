@@ -1,0 +1,4 @@
+$GITLAB_ASSETS_PATH          /opt/gitlab/embedded/service/gitlab-rails/public
+$GITLAB_WORKHORSE_SOCK_PATH  /var/opt/gitlab/gitlab-workhorse/socket
+$PASSENGER_RUBY_PATH         /opt/gitlab/embedded/bin/ruby
+$PASSENGER_PATH_VALUE        /opt/gitlab/bin:/opt/gitlab/embedded/bin:/usr/local/bin:/usr/bin:/bin
