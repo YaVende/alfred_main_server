@@ -1,112 +1,120 @@
-#include /etc/nginx/passenger.conf
+# This file is managed by gitlab-ctl. Manual changes will be
+# erased! To change the contents below, edit /etc/gitlab/gitlab.rb
+# and run `sudo gitlab-ctl reconfigure`.
+log_format gitlab_access '$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent "$http_referer" "$http_user_agent"';
+log_format gitlab_mattermost_access '$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent "$http_referer" "$http_user_agent"';
+
+server_names_hash_bucket_size 64;
+
+sendfile on;
+tcp_nopush on;
+tcp_nodelay on;
+keepalive_timeout 65;
+proxy_cache_path proxy_cache keys_zone=gitlab:10m max_size=1g levels=1:2;
+proxy_cache gitlab;
+
+map $http_upgrade $connection_upgrade {
+  default upgrade;
+  ''      close;
+}
 
 upstream gitlab-workhorse {
-  server unix://${GITLAB_WORKHORSE_PATH} fail_timeout=0;
+  server unix://${GITLAB_WORKHORSE_SOCK_PATH};
 }
 
 server {
-  listen *:80;
-  server_name git.example.com;
-  server_tokens off;
-  root ${GITLAB_ASSETS_PATH};
+  server_name ${GITLAB_DOMAIN};
+  include '/etc/nginx/snippets/acme_challenge.conf';
+  include '/etc/nginx/snippets/redirect_to_https.conf';
+}
 
-  client_max_body_size 250m;
+server {
+  server_name ${GITLAB_HOST};
+  include '/etc/nginx/snippets/https.conf';
+  server_tokens off; ## Don't show the nginx version number, a security best practice
 
-  # Ensure Passenger uses the bundled Ruby version
-  passenger_ruby ${PASSENGER_RUBY_PATH};
+  ## Increase this if you want to upload large attachments
+  ## Or if you want to accept large git objects over http
+  client_max_body_size 0;
 
-  # Correct the $PATH variable to included packaged executables
-  passenger_env_var PATH "${PASSENGER_PATH_VALUE}";
-
-  # Make sure Passenger runs as the correct user and group to
-  # prevent permission issues
-  passenger_user git;
-  passenger_group git;
-
-  # Enable Passenger & keep at least one instance running at all times
-  passenger_enabled on;
-  passenger_min_instances 1;
-
-  location ~ ^/[\w\.-]+/[\w\.-]+/(info/refs|git-upload-pack|git-receive-pack)$ {
-    # 'Error' 418 is a hack to re-use the @gitlab-workhorse block
-    error_page 418 = @gitlab-workhorse;
-    return 418;
-  }
-
-  location ~ ^/[\w\.-]+/[\w\.-]+/repository/archive {
-    # 'Error' 418 is a hack to re-use the @gitlab-workhorse block
-    error_page 418 = @gitlab-workhorse;
-    return 418;
-  }
-
-  location ~ ^/api/v3/projects/.*/repository/archive {
-    # 'Error' 418 is a hack to re-use the @gitlab-workhorse block
-    error_page 418 = @gitlab-workhorse;
-    return 418;
-  }
-
-  # Build artifacts should be submitted to this location
-  location ~ ^/[\w\.-]+/[\w\.-]+/builds/download {
-      client_max_body_size 0;
-      # 'Error' 418 is a hack to re-use the @gitlab-workhorse block
-      error_page 418 = @gitlab-workhorse;
-      return 418;
-  }
-
-  # Build artifacts should be submitted to this location
-  location ~ /ci/api/v1/builds/[0-9]+/artifacts {
-      client_max_body_size 0;
-      # 'Error' 418 is a hack to re-use the @gitlab-workhorse block
-      error_page 418 = @gitlab-workhorse;
-      return 418;
-  }
-
-  # For protocol upgrades from HTTP/1.0 to HTTP/1.1 we need to provide Host header if its missing
+  ## Real IP Module Config
+  ## http://nginx.org/en/docs/http/ngx_http_realip_module.html
   if ($http_host = "") {
-  # use one of values defined in server_name
-    set $http_host_with_default "git.example.com";
+    set $http_host_with_default "${GITLAB_HOST}";
   }
 
   if ($http_host != "") {
     set $http_host_with_default $http_host;
   }
 
-  location @gitlab-workhorse {
+  ## If you use HTTPS make sure you disable gzip compression
+  ## to be safe against BREACH attack.
+  ## https://github.com/gitlabhq/gitlabhq/issues/694
+  ## Some requests take more than 30 seconds.
+  proxy_read_timeout      3600;
+  proxy_connect_timeout   300;
+  proxy_redirect          off;
+  proxy_http_version 1.1;
 
-    ## https://github.com/gitlabhq/gitlabhq/issues/694
-    ## Some requests take more than 30 seconds.
-    proxy_read_timeout      3600;
-    proxy_connect_timeout   300;
-    proxy_redirect          off;
+  proxy_set_header Host $http_host_with_default;
+  proxy_set_header X-Real-IP $remote_addr;
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_set_header Upgrade $http_upgrade;
+  proxy_set_header Connection $connection_upgrade;
+  proxy_set_header X-Forwarded-Proto https;
+  proxy_set_header X-Forwarded-Ssl on;
 
-    # Do not buffer Git HTTP responses
-    proxy_buffering off;
-
-    proxy_set_header    Host                $http_host_with_default;
-    proxy_set_header    X-Real-IP           $remote_addr;
-    proxy_set_header    X-Forwarded-For     $proxy_add_x_forwarded_for;
-    proxy_set_header    X-Forwarded-Proto   $scheme;
-
+  location ~ (\.git/gitlab-lfs/objects|\.git/info/lfs/objects/batch$) {
+    proxy_cache off;
     proxy_pass http://gitlab-workhorse;
-
-    ## The following settings only work with NGINX 1.7.11 or newer
-    #
-    ## Pass chunked request bodies to gitlab-workhorse as-is
-    # proxy_request_buffering off;
-    # proxy_http_version 1.1;
+    proxy_request_buffering off;
   }
 
-  ## Enable gzip compression as per rails guide:
-  ## http://guides.rubyonrails.org/asset_pipeline.html#gzip-compression
-  ## WARNING: If you are using relative urls remove the block below
-  ## See config/application.rb under "Relative url support" for the list of
-  ## other files that need to be changed for relative url support
-  location ~ ^/(assets)/ {
-    root ${GITLAB_ASSETS_PATH};
-    gzip_static on; # to serve pre-gzipped version
-    expires max;
-    add_header Cache-Control public;
+  location / {
+    proxy_cache off;
+    proxy_pass  http://gitlab-workhorse;
   }
 
+  location /assets {
+    proxy_cache gitlab;
+    proxy_pass  http://gitlab-workhorse;
+  }
+
+  error_page 404 /404.html;
+  error_page 422 /422.html;
+  error_page 500 /500.html;
   error_page 502 /502.html;
+
+  location ~ ^/(404|422|500|502)(-custom)?\.html$ {
+    include '/etc/nginx/snippets/gzip.conf';
+    root ${GITLAB_ASSETS_PATH};
+    internal;
+  }
+}
+
+server {
+  server_name ${GITLAB_REGISTRY_DOMAIN};
+  include '/etc/nginx/snippets/acme_challenge.conf';
+  include '/etc/nginx/snippets/redirect_to_https.conf';
+}
+
+server {
+  server_name ${GITLAB_REGISTRY_DOMAIN};
+  server_tokens off; ## Don't show the nginx version number, a security best practice
+
+  client_max_body_size 0;
+  chunked_transfer_encoding on;
+
+  location / {
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header X-Forwarded-Ssl on;
+
+    proxy_read_timeout 900;
+    proxy_cache off;
+
+    proxy_pass ${GITLAB_REGISTRY_HOST};
+  }
 }
