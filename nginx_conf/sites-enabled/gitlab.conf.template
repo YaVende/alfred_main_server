@@ -29,7 +29,7 @@ server {
 }
 
 server {
-  server_name ${GITLAB_HOST};
+  server_name ${GITLAB_DOMAIN};
   include '/etc/nginx/snippets/https.conf';
   server_tokens off; ## Don't show the nginx version number, a security best practice
 
